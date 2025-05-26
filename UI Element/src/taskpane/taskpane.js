@@ -31,6 +31,12 @@ Office.onReady((info) => {
     
     // Set up mouse position tracking in PowerPoint
     setupMouseTracking();
+
+    // Add click event listener to detect selected element
+    document.addEventListener('click', () => {
+      console.log('Click detected, running detectSelectedElement');
+      detectSelectedElement();
+    });
   }
 });
 
@@ -147,11 +153,13 @@ function detectPicturesSpecifically(selectionInfo) {
   return new Promise((resolve) => {
     PowerPoint.run(async (context) => {
       try {
+        console.log('Running detectPicturesSpecifically');
         // Get the selected slides
         const selectedSlides = context.presentation.getSelectedSlides();
         selectedSlides.load("items");
         await context.sync();
         
+        console.log('Selected slides loaded:', selectedSlides.items.length);
         // Check if there are any selected slides
         if (!selectedSlides.items || selectedSlides.items.length === 0) {
           resolve();
@@ -165,6 +173,7 @@ function detectPicturesSpecifically(selectionInfo) {
         slide.load("shapes");
         await context.sync();
         
+        console.log('Shapes on slide loaded:', slide.shapes.items.length);
         if (!slide.shapes || !slide.shapes.items || slide.shapes.items.length === 0) {
           resolve();
           return;
@@ -182,6 +191,7 @@ function detectPicturesSpecifically(selectionInfo) {
         // Filter for pictures
         const pictures = shapes.filter(shape => shape.type === "Picture");
         
+        console.log('Pictures detected:', pictures.length);
         if (pictures.length === 0) {
           resolve();
           return;
@@ -204,6 +214,7 @@ function detectPicturesSpecifically(selectionInfo) {
         // Check if any pictures are selected
         const selectedPictures = pictures.filter(pic => pic.isSelected);
         
+        console.log('Selected pictures:', selectedPictures.length);
         if (selectedPictures.length > 0) {
           // Found selected pictures!
           selectionInfo.pictures = selectedPictures;
@@ -228,6 +239,7 @@ function detectPicturesSpecifically(selectionInfo) {
             }
           }
           
+          console.log('Pictures at position:', picturesAtPosition.length);
           if (picturesAtPosition.length > 0) {
             // If multiple pictures overlap, take the one with highest z-index (top-most)
             const topPictures = picturesAtPosition.sort((a, b) => b.zIndex - a.zIndex);
@@ -257,11 +269,13 @@ function detectShapesDirectly(selectionInfo) {
   return new Promise((resolve) => {
     PowerPoint.run(async (context) => {
       try {
+        console.log('Running detectShapesDirectly');
         // Get the selected slides
         const selectedSlides = context.presentation.getSelectedSlides();
         selectedSlides.load("items");
         await context.sync();
         
+        console.log('Selected slides loaded:', selectedSlides.items.length);
         // Check if there are any selected slides
         if (!selectedSlides.items || selectedSlides.items.length === 0) {
           resolve();
@@ -279,6 +293,7 @@ function detectShapesDirectly(selectionInfo) {
           selection.load("shapes");
           await context.sync();
           
+          console.log('Direct selection shapes loaded:', selection.shapes.items.length);
           if (selection.shapes && selection.shapes.items && selection.shapes.items.length > 0) {
             // We found directly selected shapes!
             const selectedShapes = selection.shapes.items;
@@ -321,6 +336,7 @@ function detectShapesDirectly(selectionInfo) {
           view.load("selection");
           await context.sync();
           
+          console.log('Active view selection loaded:', view.selection ? view.selection.shapes.items.length : 0);
           if (view.selection) {
             view.selection.load("shapes");
             await context.sync();
@@ -352,6 +368,7 @@ function detectShapesDirectly(selectionInfo) {
         slide.load("shapes");
         await context.sync();
         
+        console.log('Shapes on slide loaded:', slide.shapes.items.length);
         if (!slide.shapes || !slide.shapes.items || slide.shapes.items.length === 0) {
           resolve();
           return;
@@ -385,6 +402,7 @@ function detectShapesDirectly(selectionInfo) {
         // Check if any shapes are marked as selected
         const selectedShapes = shapes.filter(shape => shape.isSelected);
         
+        console.log('Selected shapes:', selectedShapes.length);
         if (selectedShapes.length > 0) {
           // We found selected shapes!
           selectionInfo.shapes = selectedShapes;
@@ -447,6 +465,7 @@ function detectShapesDirectly(selectionInfo) {
               }
             }
             
+            console.log('Shapes at position:', shapesAtPosition.length);
             if (shapesAtPosition.length > 0) {
               // If multiple shapes overlap, take the one with highest z-index (top-most)
               const topShapes = shapesAtPosition.sort((a, b) => b.zIndex - a.zIndex);
@@ -468,6 +487,7 @@ function detectShapesDirectly(selectionInfo) {
           // Sort shapes by z-index (higher z-index is typically the one on top that was clicked)
           const sortedShapes = [...shapes].sort((a, b) => b.zIndex - a.zIndex);
           
+          console.log('Shapes sorted by z-index:', sortedShapes.length);
           if (sortedShapes.length > 0) {
             // Store all shapes for reference
             selectionInfo.allShapes = shapes;
