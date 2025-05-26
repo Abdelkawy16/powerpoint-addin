@@ -93,10 +93,36 @@ function detectSelectedElement() {
   try {
     document.getElementById('item-subject').textContent = "Detecting selected element...";
     
-    // First try to detect shapes directly
-    detectShapesDirectly();
+    // Create a selection info object to store all detected information
+    const selectionInfo = {
+      text: null,
+      shapes: [],
+      pictures: [],
+      detectionMethod: null
+    };
     
-    // Also try to get text selection using the common Office API
+    // Get all selection information in parallel
+    Promise.all([
+      detectSelectionText(selectionInfo),
+      detectPicturesSpecifically(selectionInfo),
+      detectShapesDirectly(selectionInfo)
+    ]).then(() => {
+      // Once all detection methods have completed, display the results
+      displaySelectionInfo(selectionInfo);
+    }).catch(error => {
+      console.error("Selection detection error:", error);
+      document.getElementById('item-subject').textContent = 'Error: ' + (error.message || error);
+    });
+    
+  } catch (error) {
+    console.error("Selection detection error:", error);
+    document.getElementById('item-subject').textContent = 'Error: ' + (error.message || error);
+  }
+}
+
+// Function to detect selected text
+function detectSelectionText(selectionInfo) {
+  return new Promise((resolve) => {
     Office.context.document.getSelectedDataAsync(
       Office.CoercionType.Text,
       { valueFormat: "unformatted" },
@@ -104,149 +130,273 @@ function detectSelectedElement() {
         if (asyncResult.status === Office.AsyncResultStatus.Succeeded) {
           const selectedText = asyncResult.value || "";
           
-          // Only process if the selection has actually changed and there is text
-          if (selectedText !== lastSelectedText && selectedText.length > 0) {
+          if (selectedText.length > 0) {
+            selectionInfo.text = selectedText;
+            selectionInfo.detectionMethod = "text";
             lastSelectedText = selectedText;
-            document.getElementById('item-subject').textContent = 
-              `Selected text: "${selectedText}"\n\n`;
-            
-            // Continue with shape detection to get more details
-            getSelectedShapeDetails(selectedText);
           }
         }
+        resolve();
       }
     );
-  } catch (error) {
-    console.error("Selection detection error:", error);
-    document.getElementById('item-subject').textContent = 'Error: ' + (error.message || error);
-  }
+  });
+}
+
+// Function to specifically detect pictures
+function detectPicturesSpecifically(selectionInfo) {
+  return new Promise((resolve) => {
+    PowerPoint.run(async (context) => {
+      try {
+        // Get the selected slides
+        const selectedSlides = context.presentation.getSelectedSlides();
+        selectedSlides.load("items");
+        await context.sync();
+        
+        // Check if there are any selected slides
+        if (!selectedSlides.items || selectedSlides.items.length === 0) {
+          resolve();
+          return;
+        }
+        
+        // Get the first selected slide
+        const slide = selectedSlides.items[0];
+        
+        // Try to get pictures on the slide
+        slide.load("shapes");
+        await context.sync();
+        
+        if (!slide.shapes || !slide.shapes.items || slide.shapes.items.length === 0) {
+          resolve();
+          return;
+        }
+        
+        // Get all shapes and filter for pictures
+        const shapes = slide.shapes.items;
+        
+        // Load type property for all shapes
+        for (let i = 0; i < shapes.length; i++) {
+          shapes[i].load("type");
+        }
+        await context.sync();
+        
+        // Filter for pictures
+        const pictures = shapes.filter(shape => shape.type === "Picture");
+        
+        if (pictures.length === 0) {
+          resolve();
+          return;
+        }
+        
+        // Load detailed properties for all pictures
+        for (let i = 0; i < pictures.length; i++) {
+          const picture = pictures[i];
+          picture.load("name,id,left,top,width,height,zIndex,isSelected,altTextDescription,altTextTitle");
+          
+          // Try to load image data if available
+          try {
+            picture.load("imageData");
+          } catch (e) {
+            console.log("Couldn't load image data", e);
+          }
+        }
+        await context.sync();
+        
+        // Check if any pictures are selected
+        const selectedPictures = pictures.filter(pic => pic.isSelected);
+        
+        if (selectedPictures.length > 0) {
+          // Found selected pictures!
+          selectionInfo.pictures = selectedPictures;
+          if (!selectionInfo.detectionMethod) {
+            selectionInfo.detectionMethod = "picture-isSelected";
+          }
+        }
+        
+        // If no selected pictures found, check if any picture contains the last clicked position
+        if (selectionInfo.pictures.length === 0 && hasMousePositionData) {
+          const picturesAtPosition = [];
+          
+          for (let i = 0; i < pictures.length; i++) {
+            const picture = pictures[i];
+            
+            // Check if the last clicked position is within this picture's bounds
+            if (lastClickedPosition.x >= picture.left && 
+                lastClickedPosition.x <= picture.left + picture.width &&
+                lastClickedPosition.y >= picture.top && 
+                lastClickedPosition.y <= picture.top + picture.height) {
+              picturesAtPosition.push(picture);
+            }
+          }
+          
+          if (picturesAtPosition.length > 0) {
+            // If multiple pictures overlap, take the one with highest z-index (top-most)
+            const topPictures = picturesAtPosition.sort((a, b) => b.zIndex - a.zIndex);
+            selectionInfo.pictures = topPictures;
+            if (!selectionInfo.detectionMethod) {
+              selectionInfo.detectionMethod = "picture-position";
+            }
+          }
+        }
+        
+        // Store all pictures for reference
+        if (selectionInfo.pictures.length === 0) {
+          selectionInfo.allPictures = pictures;
+        }
+        
+        resolve();
+      } catch (error) {
+        console.log("Picture-specific detection failed:", error);
+        resolve();
+      }
+    });
+  });
 }
 
 // Function to detect shapes directly
-function detectShapesDirectly() {
-  PowerPoint.run(async (context) => {
-    try {
-      // Get the selected slides
-      const selectedSlides = context.presentation.getSelectedSlides();
-      selectedSlides.load("items");
-      await context.sync();
-      
-      // Check if there are any selected slides
-      if (!selectedSlides.items || selectedSlides.items.length === 0) {
-        document.getElementById('item-subject').textContent = "No slide is currently selected.";
-        return;
-      }
-      
-      // Get the first selected slide
-      const slide = selectedSlides.items[0];
-      
-      // Try multiple approaches to detect the selected shape
-      
-      // Approach 1: Try to get the selection directly (newer PowerPoint versions)
+function detectShapesDirectly(selectionInfo) {
+  return new Promise((resolve) => {
+    PowerPoint.run(async (context) => {
       try {
-        const selection = context.presentation.getSelection();
-        selection.load("shapes");
+        // Get the selected slides
+        const selectedSlides = context.presentation.getSelectedSlides();
+        selectedSlides.load("items");
         await context.sync();
         
-        if (selection.shapes && selection.shapes.items && selection.shapes.items.length > 0) {
-          // We found directly selected shapes!
-          const selectedShapes = selection.shapes.items;
-          
-          // Load detailed properties for each selected shape
-          for (let i = 0; i < selectedShapes.length; i++) {
-            selectedShapes[i].load("name,id,type,text,left,top,width,height,zIndex");
-          }
-          await context.sync();
-          
-          // Display information about the selected shapes
-          let message = `Found ${selectedShapes.length} selected element(s):\n\n`;
-          
-          selectedShapes.forEach((shape, index) => {
-            message += getDetailedShapeInfo(shape, index);
-          });
-          
-          document.getElementById('item-subject').textContent = message;
-          return; // Exit early as we found what we needed
+        // Check if there are any selected slides
+        if (!selectedSlides.items || selectedSlides.items.length === 0) {
+          resolve();
+          return;
         }
-      } catch (selectionError) {
-        console.log("Direct selection API not supported:", selectionError);
-        // Continue to other methods
-      }
-      
-      // Approach 2: Try to get active view and selection (alternative method)
-      try {
-        const view = context.presentation.getActiveView();
-        view.load("selection");
-        await context.sync();
         
-        if (view.selection) {
-          view.selection.load("shapes");
+        // Get the first selected slide
+        const slide = selectedSlides.items[0];
+        
+        // Try multiple approaches to detect the selected shape
+        
+        // Approach 1: Try to get the selection directly (newer PowerPoint versions)
+        try {
+          const selection = context.presentation.getSelection();
+          selection.load("shapes");
           await context.sync();
           
-          if (view.selection.shapes && view.selection.shapes.items && view.selection.shapes.items.length > 0) {
-            const selectedShapes = view.selection.shapes.items;
+          if (selection.shapes && selection.shapes.items && selection.shapes.items.length > 0) {
+            // We found directly selected shapes!
+            const selectedShapes = selection.shapes.items;
             
             // Load detailed properties for each selected shape
             for (let i = 0; i < selectedShapes.length; i++) {
-              selectedShapes[i].load("name,id,type,text,left,top,width,height,zIndex");
+              const shape = selectedShapes[i];
+              shape.load("name,id,type,text,left,top,width,height,zIndex");
+              
+              // Load additional properties for pictures
+              try {
+                shape.load("altTextDescription,altTextTitle");
+                
+                // For pictures, load image-specific data
+                if (shape.type === "Picture" || !shape.type) {
+                  shape.load("imageData");
+                }
+              } catch (e) {
+                console.log("Couldn't load extended properties for selected shape", e);
+              }
             }
             await context.sync();
             
-            // Display information about the selected shapes
-            let message = `Found ${selectedShapes.length} selected element(s) via active view:\n\n`;
+            // Add to selection info
+            selectionInfo.shapes = selectedShapes;
+            if (!selectionInfo.detectionMethod) {
+              selectionInfo.detectionMethod = "direct-selection";
+            }
             
-            selectedShapes.forEach((shape, index) => {
-              message += getDetailedShapeInfo(shape, index);
-            });
+            resolve();
+            return;
+          }
+        } catch (selectionError) {
+          console.log("Direct selection API not supported:", selectionError);
+        }
+        
+        // Approach 2: Try to get active view and selection (alternative method)
+        try {
+          const view = context.presentation.getActiveView();
+          view.load("selection");
+          await context.sync();
+          
+          if (view.selection) {
+            view.selection.load("shapes");
+            await context.sync();
             
-            document.getElementById('item-subject').textContent = message;
-            return; // Exit early as we found what we needed
+            if (view.selection.shapes && view.selection.shapes.items && view.selection.shapes.items.length > 0) {
+              const selectedShapes = view.selection.shapes.items;
+              
+              // Load detailed properties for each selected shape
+              for (let i = 0; i < selectedShapes.length; i++) {
+                selectedShapes[i].load("name,id,type,text,left,top,width,height,zIndex");
+              }
+              await context.sync();
+              
+              // Add to selection info
+              selectionInfo.shapes = selectedShapes;
+              if (!selectionInfo.detectionMethod) {
+                selectionInfo.detectionMethod = "active-view";
+              }
+              
+              resolve();
+              return;
+            }
+          }
+        } catch (viewError) {
+          console.log("Active view selection API not supported:", viewError);
+        }
+        
+        // Approach 3: Check all shapes on the slide for isSelected property
+        slide.load("shapes");
+        await context.sync();
+        
+        if (!slide.shapes || !slide.shapes.items || slide.shapes.items.length === 0) {
+          resolve();
+          return;
+        }
+        
+        // Load all shapes with their properties
+        const shapes = slide.shapes.items;
+        
+        // Try to find selected shapes by checking isSelected property
+        for (let i = 0; i < shapes.length; i++) {
+          const shape = shapes[i];
+          // Load all relevant properties including isSelected if available
+          shape.load("name,id,type,text,left,top,width,height,zIndex,isSelected");
+          
+          // Load additional properties that might be available
+          try {
+            // These properties might not be available on all shapes or PowerPoint versions
+            shape.load("altTextDescription,altTextTitle");
+            
+            // Try to load picture-specific properties if available
+            if (shape.type === "Picture" || !shape.type) {
+              shape.load("imageData");
+            }
+          } catch (e) {
+            console.log("Couldn't load some extended properties", e);
           }
         }
-      } catch (viewError) {
-        console.log("Active view selection API not supported:", viewError);
-        // Continue to other methods
-      }
-      
-      // Approach 3: Check all shapes on the slide for isSelected property
-      slide.load("shapes");
-      await context.sync();
-      
-      if (!slide.shapes || !slide.shapes.items || slide.shapes.items.length === 0) {
-        document.getElementById('item-subject').textContent = "No elements found on the current slide.";
-        return;
-      }
-      
-      // Load all shapes with their properties
-      const shapes = slide.shapes.items;
-      let foundSelectedShape = false;
-      
-      // Try to find selected shapes by checking isSelected property
-      for (let i = 0; i < shapes.length; i++) {
-        const shape = shapes[i];
-        // Load all relevant properties including isSelected if available
-        shape.load("name,id,type,text,left,top,width,height,zIndex,isSelected");
-      }
-      
-      await context.sync();
-      
-      // Check if any shapes are marked as selected
-      const selectedShapes = shapes.filter(shape => shape.isSelected);
-      
-      if (selectedShapes.length > 0) {
-        // We found selected shapes!
-        let message = `Found ${selectedShapes.length} selected element(s):\n\n`;
         
-        selectedShapes.forEach((shape, index) => {
-          message += getDetailedShapeInfo(shape, index);
-        });
+        await context.sync();
         
-        document.getElementById('item-subject').textContent = message;
-        foundSelectedShape = true;
-      }
-      
-      // Approach 4: Try to find shapes that were most recently modified
-      if (!foundSelectedShape) {
+        // Check if any shapes are marked as selected
+        const selectedShapes = shapes.filter(shape => shape.isSelected);
+        
+        if (selectedShapes.length > 0) {
+          // We found selected shapes!
+          selectionInfo.shapes = selectedShapes;
+          if (!selectionInfo.detectionMethod) {
+            selectionInfo.detectionMethod = "isSelected";
+          }
+          
+          resolve();
+          return;
+        }
+        
+        // Approach 4: Try to find shapes that were most recently modified
         try {
           // Get last modified shapes if available
           for (let i = 0; i < shapes.length; i++) {
@@ -266,121 +416,211 @@ function detectShapesDirectly() {
               mostRecentShape.load("name,id,type,text,left,top,width,height,zIndex");
               await context.sync();
               
-              let message = `Most recently modified element:\n\n`;
-              message += getDetailedShapeInfo(mostRecentShape, 0);
+              selectionInfo.shapes = [mostRecentShape];
+              if (!selectionInfo.detectionMethod) {
+                selectionInfo.detectionMethod = "lastModified";
+              }
               
-              document.getElementById('item-subject').textContent = message;
-              foundSelectedShape = true;
+              resolve();
+              return;
             }
           }
         } catch (modifiedError) {
           console.log("Modified time detection failed:", modifiedError);
-          // Continue to next approach
         }
-      }
-      
-      // Approach 5: Use spatial detection - find shape at last clicked position
-      if (!foundSelectedShape && hasMousePositionData) {
-        try {
-          // Find shapes that contain the last clicked position
-          const shapesAtPosition = [];
-          
-          for (let i = 0; i < shapes.length; i++) {
-            const shape = shapes[i];
+        
+        // Approach 5: Use spatial detection - find shape at last clicked position
+        if (hasMousePositionData) {
+          try {
+            // Find shapes that contain the last clicked position
+            const shapesAtPosition = [];
             
-            // Check if the last clicked position is within this shape's bounds
-            if (lastClickedPosition.x >= shape.left && 
-                lastClickedPosition.x <= shape.left + shape.width &&
-                lastClickedPosition.y >= shape.top && 
-                lastClickedPosition.y <= shape.top + shape.height) {
-              shapesAtPosition.push(shape);
+            for (let i = 0; i < shapes.length; i++) {
+              const shape = shapes[i];
+              
+              // Check if the last clicked position is within this shape's bounds
+              if (lastClickedPosition.x >= shape.left && 
+                  lastClickedPosition.x <= shape.left + shape.width &&
+                  lastClickedPosition.y >= shape.top && 
+                  lastClickedPosition.y <= shape.top + shape.height) {
+                shapesAtPosition.push(shape);
+              }
             }
-          }
-          
-          if (shapesAtPosition.length > 0) {
-            // If multiple shapes overlap, take the one with highest z-index (top-most)
-            const topShape = shapesAtPosition.sort((a, b) => b.zIndex - a.zIndex)[0];
             
-            let message = `Element at clicked position (${lastClickedPosition.x}, ${lastClickedPosition.y}):\n\n`;
-            message += getDetailedShapeInfo(topShape, 0);
-            
-            document.getElementById('item-subject').textContent = message;
-            foundSelectedShape = true;
+            if (shapesAtPosition.length > 0) {
+              // If multiple shapes overlap, take the one with highest z-index (top-most)
+              const topShapes = shapesAtPosition.sort((a, b) => b.zIndex - a.zIndex);
+              selectionInfo.shapes = topShapes;
+              if (!selectionInfo.detectionMethod) {
+                selectionInfo.detectionMethod = "position";
+              }
+              
+              resolve();
+              return;
+            }
+          } catch (positionError) {
+            console.log("Position-based detection failed:", positionError);
           }
-        } catch (positionError) {
-          console.log("Position-based detection failed:", positionError);
-          // Continue to fallback
         }
-      }
-      
-      // Approach 6: Try to detect the most recently clicked shape based on z-order
-      // This is a heuristic approach that might help in some cases
-      if (!foundSelectedShape) {
+        
+        // Approach 6: Try to detect the most recently clicked shape based on z-order
         try {
           // Sort shapes by z-index (higher z-index is typically the one on top that was clicked)
           const sortedShapes = [...shapes].sort((a, b) => b.zIndex - a.zIndex);
           
           if (sortedShapes.length > 0) {
-            // Take the top-most shape as a best guess
-            const topShape = sortedShapes[0];
-            topShape.load("name,id,type,text,left,top,width,height,zIndex");
-            await context.sync();
+            // Store all shapes for reference
+            selectionInfo.allShapes = shapes;
             
-            let message = `Best guess of selected element (top-most element):\n\n`;
-            message += getDetailedShapeInfo(topShape, 0);
-            message += `Note: This is a best guess based on the top-most element on the slide.\n`;
-            message += `For more accurate results, try clicking directly on an element before pressing 'Get Info'.\n\n`;
-            
-            document.getElementById('item-subject').textContent = message;
-            foundSelectedShape = true;
+            resolve();
+            return;
           }
         } catch (zOrderError) {
           console.log("Z-order detection failed:", zOrderError);
-          // Continue to fallback
         }
+        
+        // If we reach here, store all shapes for reference
+        selectionInfo.allShapes = shapes;
+        
+        resolve();
+      } catch (error) {
+        console.error("Shape detection error:", error);
+        resolve();
+      }
+    });
+  });
+}
+
+// Function to display the selection information in a user-friendly format
+function displaySelectionInfo(selectionInfo) {
+  let message = "";
+  
+  // First, check if we have any selected elements
+  const hasSelection = selectionInfo.text || 
+                      (selectionInfo.shapes && selectionInfo.shapes.length > 0) || 
+                      (selectionInfo.pictures && selectionInfo.pictures.length > 0);
+  
+  if (!hasSelection) {
+    message = "No element is currently selected.\n\n";
+    
+    // Show all elements on the slide grouped by type
+    const allShapes = selectionInfo.allShapes || [];
+    const allPictures = selectionInfo.allPictures || [];
+    
+    if (allShapes.length > 0 || allPictures.length > 0) {
+      message += `All elements on current slide (${allShapes.length + allPictures.length} total):\n\n`;
+      
+      // Group shapes by type
+      const elementsByType = {};
+      
+      // Add shapes
+      allShapes.forEach((shape) => {
+        const type = shape.type || "Unknown";
+        if (!elementsByType[type]) {
+          elementsByType[type] = [];
+        }
+        elementsByType[type].push(shape);
+      });
+      
+      // Add pictures (if not already included in shapes)
+      if (allPictures.length > 0 && !elementsByType["Picture"]) {
+        elementsByType["Picture"] = allPictures;
       }
       
-      // If no selected shape was found, show all shapes with their details
-      if (!foundSelectedShape) {
-        // Group shapes by type for better organization
-        const shapesByType = {};
+      // Display elements grouped by type
+      for (const type in elementsByType) {
+        message += `== ${type} Elements (${elementsByType[type].length}) ==\n\n`;
         
-        shapes.forEach((shape, index) => {
-          const type = shape.type || "Unknown";
-          if (!shapesByType[type]) {
-            shapesByType[type] = [];
-          }
-          shapesByType[type].push({ shape, index });
+        elementsByType[type].forEach((element, index) => {
+          message += `${index + 1}. ${element.name || "Unnamed"} (ID: ${element.id})\n`;
+          message += `   Position: (${element.left}, ${element.top})\n`;
+          message += `   Size: ${element.width} x ${element.height}\n`;
+          message += `   Z-Index: ${element.zIndex}\n\n`;
         });
-        
-        let message = `Could not identify which element is selected.\n\n`;
-        message += `All elements on current slide (${shapes.length} total):\n\n`;
-        
-        // Display shapes grouped by type
-        for (const type in shapesByType) {
-          message += `== ${type} Elements (${shapesByType[type].length}) ==\n\n`;
-          
-          shapesByType[type].forEach(({ shape, index }) => {
-            message += `${index + 1}. ${shape.name || "Unnamed"} (ID: ${shape.id})\n`;
-            message += `   Position: (${shape.left}, ${shape.top})\n`;
-            message += `   Size: ${shape.width} x ${shape.height}\n`;
-            message += `   Z-Index: ${shape.zIndex}\n\n`;
-          });
-        }
-        
-        message += "\nTips for selecting elements:\n";
-        message += "1. Click directly on the element you want to examine\n";
-        message += "2. Press the 'Get Info' button immediately after selecting\n";
-        message += "3. For text elements, try selecting some text within the element\n";
-        message += "4. Try using the 'Capture Current Position' button while hovering over an element";
-        
-        document.getElementById('item-subject').textContent = message;
       }
-    } catch (error) {
-      console.error("Shape detection error:", error);
-      document.getElementById('item-subject').textContent = 'Error detecting shapes: ' + (error.message || error);
+      
+      message += "\nTips for selecting elements:\n";
+      message += "1. Click directly on the element you want to examine\n";
+      message += "2. Press the 'Get Info' button immediately after selecting\n";
+      message += "3. For text elements, try selecting some text within the element\n";
+      message += "4. Try using the 'Capture Current Position' button while hovering over an element";
+    } else {
+      message += "No elements found on the current slide.";
     }
-  });
+    
+    document.getElementById('item-subject').textContent = message;
+    return;
+  }
+  
+  // If we have a selection, show details about the selected element(s)
+  message = "=== CURRENT SELECTION INFO ===\n\n";
+  
+  // If we have selected text, show it first
+  if (selectionInfo.text) {
+    message += "SELECTED TEXT:\n";
+    message += `"${selectionInfo.text}"\n\n`;
+  }
+  
+  // If we have selected pictures, show their details
+  if (selectionInfo.pictures && selectionInfo.pictures.length > 0) {
+    message += `SELECTED PICTURE${selectionInfo.pictures.length > 1 ? 'S' : ''}:\n`;
+    
+    selectionInfo.pictures.forEach((picture, index) => {
+      message += getPictureDetailsString(picture, index);
+    });
+    
+    message += "\n";
+  }
+  
+  // If we have selected shapes, show their details
+  if (selectionInfo.shapes && selectionInfo.shapes.length > 0) {
+    // Filter out pictures that are already shown
+    const nonPictureShapes = selectionInfo.shapes.filter(shape => 
+      shape.type !== "Picture" || 
+      !selectionInfo.pictures || 
+      !selectionInfo.pictures.some(pic => pic.id === shape.id)
+    );
+    
+    if (nonPictureShapes.length > 0) {
+      message += `SELECTED SHAPE${nonPictureShapes.length > 1 ? 'S' : ''}:\n`;
+      
+      nonPictureShapes.forEach((shape, index) => {
+        message += getDetailedShapeInfo(shape, index);
+      });
+    }
+  }
+  
+  // Add detection method information
+  if (selectionInfo.detectionMethod) {
+    message += "\nDetection method: " + selectionInfo.detectionMethod;
+  }
+  
+  document.getElementById('item-subject').textContent = message;
+}
+
+// Helper function to get detailed information about a picture
+function getPictureDetailsString(picture, index) {
+  let details = `${index + 1}. ${picture.name || "Unnamed Picture"} (ID: ${picture.id})\n`;
+  details += `   Type: Picture/Image\n`;
+  details += `   Position: (${picture.left}, ${picture.top})\n`;
+  details += `   Size: ${picture.width} x ${picture.height}\n`;
+  details += `   Z-Index: ${picture.zIndex}\n`;
+  
+  // Add picture-specific details
+  if (picture.altTextDescription) {
+    details += `   Alt Text: ${picture.altTextDescription}\n`;
+  }
+  
+  if (picture.altTextTitle) {
+    details += `   Alt Text Title: ${picture.altTextTitle}\n`;
+  }
+  
+  if (picture.imageData && picture.imageData.format) {
+    details += `   Image Format: ${picture.imageData.format}\n`;
+  }
+  
+  details += "\n";
+  return details;
 }
 
 // Helper function to get detailed information about a shape
@@ -392,6 +632,23 @@ function getDetailedShapeInfo(shape, index) {
   switch (shape.type) {
     case "Picture":
       details += `   Element Type: Image/Picture\n`;
+      
+      // Load additional picture-specific properties if available
+      try {
+        if (shape.imageData) {
+          details += `   Image Format: ${shape.imageData.format || "Unknown"}\n`;
+        }
+        
+        if (shape.altTextDescription) {
+          details += `   Alt Text: ${shape.altTextDescription}\n`;
+        }
+        
+        if (shape.altTextTitle) {
+          details += `   Alt Text Title: ${shape.altTextTitle}\n`;
+        }
+      } catch (e) {
+        console.log("Couldn't load some picture properties", e);
+      }
       break;
     case "Group":
       details += `   Element Type: Group (contains multiple elements)\n`;
@@ -426,139 +683,4 @@ function getDetailedShapeInfo(shape, index) {
 
 export async function run() {
   detectSelectedElement();
-}
-
-// Function to get details about the selected shape or all shapes if none is selected
-async function getSelectedShapeDetails(selectedText = null) {
-  try {
-    await PowerPoint.run(async (context) => {
-      try {
-        // Get the selected slides
-        const selectedSlides = context.presentation.getSelectedSlides();
-        selectedSlides.load("items");
-        await context.sync();
-        
-        // Check if there are any selected slides
-        if (!selectedSlides.items || selectedSlides.items.length === 0) {
-          document.getElementById('item-subject').textContent += "\n\nNo slide is currently selected.";
-          return;
-        }
-        
-        // Get the first selected slide
-        const slide = selectedSlides.items[0];
-        
-        // Load the shapes collection
-        slide.load("shapes");
-        await context.sync();
-        
-        if (slide.shapes) {
-          slide.shapes.load("items");
-          await context.sync();
-          
-          let message = selectedText ? 
-            document.getElementById('item-subject').textContent : 
-            "Detecting selected shape... ";
-          
-          // Check if we have shapes on the slide
-          if (slide.shapes.items && slide.shapes.items.length > 0) {
-            const shapes = slide.shapes.items;
-            
-            // If we have selected text, try to find which shape contains it
-            let foundSelectedShape = false;
-            
-            // First attempt: Use selected text to identify the shape
-            if (selectedText) {
-              message += "Attempting to identify the shape containing this text...\n\n";
-              
-              // Load more properties for each shape
-              for (let i = 0; i < shapes.length; i++) {
-                const shape = shapes[i];
-                shape.load("name,id,type,text,left,top,width,height,zIndex,isSelected");
-                await context.sync();
-                
-                // Check if this shape contains text and if it matches our selected text
-                if (shape.text && shape.text.indexOf(selectedText) !== -1) {
-                  message += `Found shape containing selected text:\n\n`;
-                  message += getShapeDetailsString(shape, i);
-                  foundSelectedShape = true;
-                  break;
-                }
-                
-                // Some PowerPoint versions support isSelected property
-                if (shape.isSelected) {
-                  message += `Found selected shape:\n\n`;
-                  message += getShapeDetailsString(shape, i);
-                  foundSelectedShape = true;
-                  break;
-                }
-              }
-              
-              if (!foundSelectedShape) {
-                message += "Could not identify which specific shape contains the selected text.\n\n";
-              }
-            }
-            
-            // Second attempt: Try to detect selected shape using alternative methods
-            if (!foundSelectedShape) {
-              // Try to get the active selection via the API (some PowerPoint versions support this)
-              try {
-                const selection = context.presentation.getSelection();
-                selection.load("shapes");
-                await context.sync();
-                
-                if (selection.shapes && selection.shapes.items && selection.shapes.items.length > 0) {
-                  message += `Found selected shape via selection API:\n\n`;
-                  const selectedShape = selection.shapes.items[0];
-                  selectedShape.load("name,id,type,text,left,top,width,height,zIndex");
-                  await context.sync();
-                  
-                  message += getShapeDetailsString(selectedShape, 0);
-                  foundSelectedShape = true;
-                }
-              } catch (selectionError) {
-                console.log("Selection API not supported or other error:", selectionError);
-                // Continue to fallback method
-              }
-            }
-            
-            // If we still didn't find a specific shape, show all shapes
-            if (!foundSelectedShape) {
-              message += `All elements on current slide (${shapes.length} total):\n\n`;
-              
-              // Load more properties for each shape
-              for (let i = 0; i < shapes.length; i++) {
-                const shape = shapes[i];
-                shape.load("name,id,type,left,top,width,height,zIndex");
-                await context.sync();
-                
-                message += `${i + 1}. ${shape.name || "Unnamed"} (ID: ${shape.id})\n`;
-                message += `   Type: ${shape.type}, Position: (${shape.left}, ${shape.top})\n`;
-                message += `   Size: ${shape.width} x ${shape.height}, Z-Index: ${shape.zIndex}\n\n`;
-              }
-              
-              message += "\nTip: Select text within a shape to help identify it more precisely.";
-            }
-          } else {
-            message += "No elements found on the current slide.";
-          }
-          
-          // Update the display
-          document.getElementById('item-subject').textContent = message;
-        } else {
-          document.getElementById('item-subject').textContent += "\n\nCould not access shapes on the current slide.";
-        }
-      } catch (innerError) {
-        console.error("Inner error:", innerError);
-        document.getElementById('item-subject').textContent += `\n\nError processing slide: ${innerError.message || innerError}`;
-      }
-    });
-  } catch (error) {
-    console.error("Shape detection error:", error);
-    document.getElementById('item-subject').textContent += '\n\nError detecting shapes: ' + (error.message || error);
-  }
-}
-
-// Helper function to format shape details as a string
-function getShapeDetailsString(shape, index) {
-  return getDetailedShapeInfo(shape, index);
 }
