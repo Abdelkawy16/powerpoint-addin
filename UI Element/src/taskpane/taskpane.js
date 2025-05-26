@@ -5,6 +5,13 @@
 
 /* global document, Office */
 
+// Global variables to track selection and mouse state
+let lastSelectedText = "";
+let selectionChangeTimeout = null;
+let lastMousePosition = { x: 0, y: 0 };
+let lastClickedPosition = { x: 0, y: 0 };
+let hasMousePositionData = false;
+
 Office.onReady((info) => {
   if (info.host === Office.HostType.PowerPoint) {
     document.getElementById("sideload-msg").style.display = "none";
@@ -21,12 +28,52 @@ Office.onReady((info) => {
         }
       }
     );
+    
+    // Set up mouse position tracking in PowerPoint
+    setupMouseTracking();
   }
 });
 
-// Global variables to track selection state
-let lastSelectedText = "";
-let selectionChangeTimeout = null;
+// Set up mouse position tracking
+function setupMouseTracking() {
+  // Add message listener for mouse position data from PowerPoint
+  Office.context.document.addHandlerAsync(
+    "documentSelectionChanged", 
+    function() {
+      // This event fires when selection changes, which often happens after a mouse click
+      // We'll capture the last mouse position at this time
+      try {
+        Office.context.document.getSelectedDataAsync(
+          Office.CoercionType.SlideRange,
+          function(asyncResult) {
+            if (asyncResult.status === Office.AsyncResultStatus.Succeeded) {
+              // Record that we clicked somewhere
+              lastClickedPosition = lastMousePosition;
+              hasMousePositionData = true;
+            }
+          }
+        );
+      } catch (error) {
+        console.log("Error in mouse tracking:", error);
+      }
+    }
+  );
+  
+  // Add a custom button to capture current position
+  const capturePositionButton = document.createElement("button");
+  capturePositionButton.textContent = "Capture Current Position";
+  capturePositionButton.onclick = function() {
+    lastClickedPosition = lastMousePosition;
+    hasMousePositionData = true;
+    detectSelectedElement();
+  };
+  
+  // Insert the button before the main run button
+  const runButton = document.getElementById("run");
+  if (runButton && runButton.parentNode) {
+    runButton.parentNode.insertBefore(capturePositionButton, runButton);
+  }
+}
 
 // Handler for selection changed events
 function selectionChangedHandler(eventArgs) {
@@ -198,7 +245,75 @@ function detectShapesDirectly() {
         foundSelectedShape = true;
       }
       
-      // Approach 4: Try to detect the most recently clicked shape based on z-order
+      // Approach 4: Try to find shapes that were most recently modified
+      if (!foundSelectedShape) {
+        try {
+          // Get last modified shapes if available
+          for (let i = 0; i < shapes.length; i++) {
+            shapes[i].load("lastModified");
+          }
+          await context.sync();
+          
+          // Sort by last modified time if available
+          const shapesWithModifiedTime = shapes.filter(s => s.lastModified);
+          if (shapesWithModifiedTime.length > 0) {
+            const sortedByModified = [...shapesWithModifiedTime].sort((a, b) => 
+              new Date(b.lastModified) - new Date(a.lastModified)
+            );
+            
+            if (sortedByModified.length > 0) {
+              const mostRecentShape = sortedByModified[0];
+              mostRecentShape.load("name,id,type,text,left,top,width,height,zIndex");
+              await context.sync();
+              
+              let message = `Most recently modified element:\n\n`;
+              message += getDetailedShapeInfo(mostRecentShape, 0);
+              
+              document.getElementById('item-subject').textContent = message;
+              foundSelectedShape = true;
+            }
+          }
+        } catch (modifiedError) {
+          console.log("Modified time detection failed:", modifiedError);
+          // Continue to next approach
+        }
+      }
+      
+      // Approach 5: Use spatial detection - find shape at last clicked position
+      if (!foundSelectedShape && hasMousePositionData) {
+        try {
+          // Find shapes that contain the last clicked position
+          const shapesAtPosition = [];
+          
+          for (let i = 0; i < shapes.length; i++) {
+            const shape = shapes[i];
+            
+            // Check if the last clicked position is within this shape's bounds
+            if (lastClickedPosition.x >= shape.left && 
+                lastClickedPosition.x <= shape.left + shape.width &&
+                lastClickedPosition.y >= shape.top && 
+                lastClickedPosition.y <= shape.top + shape.height) {
+              shapesAtPosition.push(shape);
+            }
+          }
+          
+          if (shapesAtPosition.length > 0) {
+            // If multiple shapes overlap, take the one with highest z-index (top-most)
+            const topShape = shapesAtPosition.sort((a, b) => b.zIndex - a.zIndex)[0];
+            
+            let message = `Element at clicked position (${lastClickedPosition.x}, ${lastClickedPosition.y}):\n\n`;
+            message += getDetailedShapeInfo(topShape, 0);
+            
+            document.getElementById('item-subject').textContent = message;
+            foundSelectedShape = true;
+          }
+        } catch (positionError) {
+          console.log("Position-based detection failed:", positionError);
+          // Continue to fallback
+        }
+      }
+      
+      // Approach 6: Try to detect the most recently clicked shape based on z-order
       // This is a heuristic approach that might help in some cases
       if (!foundSelectedShape) {
         try {
@@ -256,7 +371,8 @@ function detectShapesDirectly() {
         message += "\nTips for selecting elements:\n";
         message += "1. Click directly on the element you want to examine\n";
         message += "2. Press the 'Get Info' button immediately after selecting\n";
-        message += "3. For text elements, try selecting some text within the element";
+        message += "3. For text elements, try selecting some text within the element\n";
+        message += "4. Try using the 'Capture Current Position' button while hovering over an element";
         
         document.getElementById('item-subject').textContent = message;
       }
